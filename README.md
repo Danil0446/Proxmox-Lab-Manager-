@@ -13,8 +13,11 @@ export DATABASE_URL="sqlite+aiosqlite:///./app.db"
 export PROXMOX_API_URL="https://your-proxmox:8006"
 export PROXMOX_TOKEN_ID="user@pve!token"
 export PROXMOX_TOKEN_SECRET="SECRET"
-uvicorn app.main:app --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+**Важно:** `--host 0.0.0.0` нужен, чтобы в панель можно было зайти по IP с другой машины (иначе backend слушает только localhost и авторизация по IP не сработает).
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 При первом запуске можно создать админа:
 
@@ -40,6 +43,21 @@ npm run dev
 
 Frontend будет на `http://localhost:3000`, backend — `http://localhost:8000`.
 
+**Если не запускается (порты заняты):** если видите `Address already in use` / `EADDRINUSE` — backend или frontend уже запущены в другом терминале. Либо используйте уже запущенное, либо освободите порты:
+
+```bash
+# Кто слушает 8000 и 3000
+ss -tulpn | grep -E '8000|3000'
+
+# Остановить backend (uvicorn на 8000)
+pkill -f "uvicorn app.main:app"
+
+# Остановить frontend (webpack на 3000)
+pkill -f "webpack-dev-server"
+```
+
+После этого снова запустите backend и frontend в двух терминалах.
+
 **Переменные окружения фронта** — в папке `frontend/` создайте файл `.env` (можно скопировать из `.env.example`). Переменные подхватываются при сборке/запуске `npm run dev`:
 
 | Переменная | Описание |
@@ -47,6 +65,8 @@ Frontend будет на `http://localhost:3000`, backend — `http://localhost:
 | `REACT_APP_API_URL` | URL backend (например `http://192.168.10.5:8000`). Если не задано — используется тот же хост, порт 8000. |
 
 ### Перенос проекта на другую машину
+
+Скрипт установки зависимостей и отдельная памятка: [`scripts/setup-new-machine.sh`](scripts/setup-new-machine.sh), [`docs/SETUP_NEW_MACHINE.md`](docs/SETUP_NEW_MACHINE.md).
 
 1. **Backend**
    - Старый `.venv` с другой машины лучше не использовать (другая версия Python/пути). Создайте новый:

@@ -136,9 +136,15 @@ class ProxmoxClient:
         """
         if newid is None:
             newid = self.get_next_vmid()
-        payload: dict[str, Any] = {"vmid": vmid, "newid": newid, "full": full}
-        if name is not None:
-            payload["name"] = name
+        # В Proxmox API VMID исходной ВМ уже указан в URL (/qemu/{vmid}/clone),
+        # передавать его ещё раз в теле запроса нельзя — это даёт
+        # "Parameter verification failed". Поэтому в payload оставляем
+        # только параметры новой ВМ.
+        # Минимальный набор параметров, который гарантированно
+        # принимает Proxmox для клонирования шаблона: newid и full.
+        # Имя ВМ задаём отдельным вызовом set_vm_name, так как
+        # передача name в clone иногда приводит к "Parameter verification failed".
+        payload: dict[str, Any] = {"newid": newid, "full": full}
         if target is not None:
             payload["target"] = target
         # Клонирование может занимать заметное время, даём больший таймаут.

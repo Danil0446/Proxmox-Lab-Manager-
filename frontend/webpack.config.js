@@ -30,6 +30,8 @@ module.exports = {
     ]
   },
   devServer: {
+    host: "0.0.0.0",
+    allowedHosts: "all",
     static: {
       directory: path.join(__dirname, "public")
     },

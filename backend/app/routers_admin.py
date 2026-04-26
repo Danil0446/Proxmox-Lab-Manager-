@@ -77,6 +77,37 @@ def _parse_template_vmids(s: str) -> list[int]:
     return sorted(set(out))
 
 
+def _os_from_lab_name(lab_name: str) -> str:
+    """Из названия лабы (например «Debian 101» или «DEMO 102») извлекает ОС/префикс."""
+    parts = (lab_name or "").strip().split()
+    if not parts:
+        return "VM"
+    if len(parts) > 1 and parts[-1].isdigit():
+        return "_".join(parts[:-1])
+    return "_".join(parts)
+
+
+def _family_name_for_vm(full_name: str, fallback_username: str) -> str:
+    """Фамилия студента для имени ВМ: первое слово из ФИО или fallback. Только буквы/цифры/подчёркивание."""
+    raw = (full_name or "").strip().split()
+    if raw:
+        name = raw[0]
+    else:
+        name = (fallback_username or "user").split("@")[0]
+    safe = re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9_-]", "_", name).strip("_") or "user"
+    if safe[0].isdigit():
+        safe = "u" + safe
+    return safe
+
+
+def _vm_display_name(os_part: str, family_name: str, index: int | None = None) -> str:
+    """Имя ВМ в Proxmox: ОС + фамилия студента, при нескольких машинах — суффикс _1, _2."""
+    base = f"{os_part}_{family_name}"
+    if index is not None:
+        return f"{base}_{index}"
+    return base
+
+
 async def _create_proxmox_user_background(
     student_id: int,
     login: str,
@@ -104,6 +135,20 @@ async def _create_proxmox_user_background(
             proxmox = ProxmoxClient.from_settings()
             if not proxmox.user_exists(userid):
                 proxmox.create_user(userid=userid, password=password, enable=1)
+            # Даём студенту минимальные права на ноду, чтобы он мог
+            # создавать/редактировать сетевые адаптеры своих ВМ.
+            try:
+                node_path = f"/nodes/{cluster.default_node or settings.proxmox_default_node}"
+                proxmox.set_acl(
+                    path=node_path,
+                    users=userid,
+                    roles=settings.proxmox_student_role,
+                    propagate=1,
+                )
+            except Exception:
+                # Если ACL на ноду не удалось выставить, не падаем — студент
+                # всё равно сможет работать со стендами, просто без создания NIC.
+                pass
             existing = await db.execute(
                 select(ProxmoxAccount).where(
                     ProxmoxAccount.student_id == student_id,
@@ -595,21 +640,6 @@ async def assign_lab_to_student(
     proxmox = ProxmoxClient.from_settings()
 
     node = lab.default_node or cluster.default_node or settings.proxmox_default_node
-    name = f"lab-{lab.id}-student-{student.id}"
-
-    if lab.use_existing_vm:
-        proxmox_vmid = lab.template_vmid
-        existing = await db.execute(
-            select(StudentLabInstance).where(
-                StudentLabInstance.proxmox_vmid == proxmox_vmid,
-                StudentLabInstance.proxmox_cluster_id == cluster.id,
-            )
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"ВМ с VMID {proxmox_vmid} уже назначена другому студенту",
-            )
 
     prox_result = await db.execute(
         select(ProxmoxAccount).where(
@@ -624,6 +654,23 @@ async def assign_lab_to_student(
             detail="Учётка студента в Proxmox ещё создаётся. Подождите 5–10 сек и нажмите «Выдать стенд» снова.",
         )
     student_userid = prox_acc.userid
+    os_part = _os_from_lab_name(lab.name)
+    family = _family_name_for_vm(student.full_name, student_userid)
+    name = _vm_display_name(os_part, family)
+
+    if lab.use_existing_vm:
+        proxmox_vmid = lab.template_vmid
+        existing = await db.execute(
+            select(StudentLabInstance).where(
+                StudentLabInstance.proxmox_vmid == proxmox_vmid,
+                StudentLabInstance.proxmox_cluster_id == cluster.id,
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ВМ с VMID {proxmox_vmid} уже назначена другому студенту",
+            )
 
     try:
         proxmox_vmid = await asyncio.to_thread(
@@ -758,7 +805,7 @@ async def assign_stands_by_templates(
     student_userid = prox_acc.userid
 
     created: list[StudentLabInstanceRead] = []
-    username = student_userid.split("@")[0]
+    family = _family_name_for_vm(student.full_name, student_userid)
     for idx, template_vmid in enumerate(vmids):
         lab_result = await db.execute(
             select(Lab).where(Lab.proxmox_cluster_id == cluster.id, Lab.template_vmid == template_vmid)
@@ -775,7 +822,8 @@ async def assign_stands_by_templates(
             db.add(lab)
             await db.flush()
         node = lab.default_node or cluster.default_node or settings.proxmox_default_node
-        name = f"lab-{lab.id}-student-{student.id}-{idx + 1}-{username}"
+        os_part = _os_from_lab_name(lab.name)
+        name = _vm_display_name(os_part, family, idx + 1 if len(vmids) > 1 else None)
         try:
             proxmox_vmid = await asyncio.to_thread(
                 _proxmox_assign_vm_sync,

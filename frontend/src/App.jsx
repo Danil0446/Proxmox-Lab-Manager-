@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import axios from "axios";
 
 // URL backend: из переменной окружения (frontend/.env) или по умолчанию тот же хост, порт 8000
@@ -11,10 +11,14 @@ function App() {
   const [role, setRole] = useState("");
   const [email, setEmail] = useState("Admin");
   const [password, setPassword] = useState("Admin");
+  const [activeTab, setActiveTab] = useState("overview"); // overview | manage
 
   const [students, setStudents] = useState([]);
   const [studentLabs, setStudentLabs] = useState({});
   const [activeGroup, setActiveGroup] = useState("Все");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedStudentIds, setSelectedStudentIds] = useState([]);
+  const [now, setNow] = useState(Date.now());
 
   const [labs, setLabs] = useState([]);
   const [defaultCluster, setDefaultCluster] = useState(null);
@@ -39,6 +43,31 @@ function App() {
   const [loadError, setLoadError] = useState(null);
 
   const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+
+  const stands = useMemo(() => {
+    const groups = {};
+    labs.forEach((lab) => {
+      const name = (lab.name || "").trim();
+      let standName = name || `VMID ${lab.template_vmid}`;
+      const parts = name.split(" ");
+      const last = parts[parts.length - 1];
+      const lastNumber = parseInt(last, 10);
+      if (!Number.isNaN(lastNumber) && lastNumber === lab.template_vmid && parts.length > 1) {
+        standName = parts.slice(0, -1).join(" ");
+      }
+      if (!groups[standName]) {
+        groups[standName] = { name: standName, labs: [], vmids: [] };
+      }
+      groups[standName].labs.push(lab);
+      groups[standName].vmids.push(lab.template_vmid);
+    });
+    return Object.values(groups);
+  }, [labs]);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleLogin = async () => {
     try {
@@ -115,67 +144,343 @@ function App() {
     }
   };
 
+  const toggleSelectStudent = (id) => {
+    setSelectedStudentIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const clearSelection = () => setSelectedStudentIds([]);
+
+  const selectAllVisible = (visibleIds) => {
+    setSelectedStudentIds(visibleIds);
+  };
+
+  const formatDurationFrom = (startedAt) => {
+    if (!startedAt) return "—";
+    const started = new Date(startedAt).getTime();
+    const diffMs = Math.max(0, now - started);
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return `${hours}ч ${minutes.toString().padStart(2, "0")}м`;
+    }
+    return `${minutes.toString().padStart(2, "0")}м ${seconds
+      .toString()
+      .padStart(2, "0")}с`;
+  };
+
+  const formatProxmoxLogin = (value) => {
+    if (!value) return "";
+    return String(value).split("@")[0];
+  };
+
+  const getStandInfoForStudent = (student) => {
+    const labsForStudent = studentLabs[student.id] || [];
+    if (!labsForStudent.length) {
+      return {
+        statusLabel: "Не запущен",
+        statusClass: "badge-idle",
+        duration: "—",
+        resources: "—"
+      };
+    }
+
+    const latest = labsForStudent.reduce((acc, item) => {
+      const t = new Date(item.created_at).getTime();
+      if (!acc) return { item, ts: t };
+      return t > acc.ts ? { item, ts: t } : acc;
+    }, null);
+
+    const inst = latest.item;
+    const status = inst.status || "";
+    let statusLabel = "Не запущен";
+    let statusClass = "badge-idle";
+    if (status === "running") {
+      statusLabel = "Работает";
+      statusClass = "badge-running";
+    } else if (status === "creating" || status === "ready") {
+      statusLabel = "Запуск...";
+      statusClass = "badge-starting";
+    } else if (status === "error") {
+      statusLabel = "Ошибка";
+      statusClass = "badge-error";
+    }
+
+    const labMeta = labs.find((l) => l.id === inst.lab_id);
+    let resources = "—";
+    if (labMeta) {
+      const cpu = labMeta.cpu_limit ? `${labMeta.cpu_limit} vCPU` : null;
+      const mem = labMeta.memory_mb ? `${labMeta.memory_mb} МБ RAM` : null;
+      const disk = labMeta.disk_gb ? `${labMeta.disk_gb} ГБ` : null;
+      const parts = [cpu, mem, disk].filter(Boolean);
+      if (parts.length) {
+        resources = parts.join(" · ");
+      }
+    }
+
+    return {
+      statusLabel,
+      statusClass,
+      duration: formatDurationFrom(inst.created_at),
+      resources
+    };
+  };
+
   return (
-    <div className="app">
-      <h1>Панель администратора</h1>
-
-      {!token && (
-        <div className="card">
-          <h2>Вход администратора</h2>
-          <div className="field">
-            <label>Логин</label>
-            <input value={email} onChange={(e) => setEmail(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>Пароль</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-          </div>
-          <button onClick={handleLogin}>Войти</button>
+    <div className="app-root">
+      <header className="app-header">
+        <div>
+          <h1>Панель администратора</h1>
+          <p className="app-header-subtitle">Управление студентами и их стендами</p>
         </div>
-      )}
-
-      {token && role === "admin" && (
-        <div className="layout">
-          <div className="card">
-            <h2>Создать студента</h2>
-            <p className="small" style={{ marginBottom: "8px", opacity: 0.9 }}>
-              Занятые логины смотрите в списке «Студенты» ниже. Для Proxmox лучше только латиница и цифры (например student1).
-            </p>
-            <div className="field">
-              <label>Логин</label>
-              <input
-                value={newStudent.login}
-                onChange={(e) => setNewStudent({ ...newStudent, login: e.target.value })}
-              />
-            </div>
-            <div className="field">
-              <label>Пароль</label>
-              <input
-                value={newStudent.password}
-                onChange={(e) => setNewStudent({ ...newStudent, password: e.target.value })}
-              />
-            </div>
-            <div className="field">
-              <label>ФИО</label>
-              <input
-                value={newStudent.full_name}
-                onChange={(e) => setNewStudent({ ...newStudent, full_name: e.target.value })}
-              />
-            </div>
-            <div className="field">
-              <label>Группа</label>
-              <input
-                value={newStudent.group_name}
-                onChange={(e) => setNewStudent({ ...newStudent, group_name: e.target.value })}
-              />
-            </div>
-            <button onClick={handleCreateStudent} disabled={creatingStudent}>
-              {creatingStudent ? "Создание…" : "Создать"}
+        {token && role === "admin" && (
+          <div className="header-actions">
+            <button
+              type="button"
+              className={`btn btn-ghost${activeTab === "overview" ? " btn-primary" : ""}`}
+              onClick={() => setActiveTab("overview")}
+            >
+              Все студенты
+            </button>
+            <button
+              type="button"
+              className={`btn btn-ghost${activeTab === "manage" ? " btn-primary" : ""}`}
+              onClick={() => setActiveTab("manage")}
+            >
+              Управление
             </button>
           </div>
+        )}
+      </header>
 
-          <div className="card">
-            <h2>Студенты</h2>
+      {!token && (
+        <main className="app-main app-main-centered">
+          <section className="card login-card">
+            <div className="card-header">
+              <div>
+                <h2>Вход администратора</h2>
+                <p className="card-subtitle">
+                  Только администратор имеет доступ к панели управления стендами.
+                </p>
+              </div>
+            </div>
+            <form
+              className="login-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleLogin();
+              }}
+            >
+              <label className="field">
+                <span className="field-label">Логин</span>
+                <input
+                  type="text"
+                  className="field-input"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="username"
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Пароль</span>
+                <input
+                  type="password"
+                  className="field-input"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+              </label>
+              <div className="login-actions">
+                <button type="submit" className="btn btn-primary">
+                  Войти
+                </button>
+              </div>
+            </form>
+          </section>
+        </main>
+      )}
+
+      {token && role === "admin" && activeTab === "overview" && (
+        <main className="app-main">
+          <div className="layout">
+            <div className="card">
+              <div className="card-header">
+                <div>
+                  <h2>Все студенты</h2>
+                  <p className="card-subtitle">
+                    Сводный список студентов и их стендов в одном месте.
+                  </p>
+                </div>
+                <div className="card-header-actions">
+                  <input
+                    type="search"
+                    className="search-input"
+                    placeholder="Поиск по имени, группе или email..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="table-wrapper">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 40 }}>
+                        <span className="sr-only">Выбор</span>
+                      </th>
+                      <th>Студент</th>
+                      <th>Группа</th>
+                      <th>Email</th>
+                      <th>Стенд</th>
+                      <th>Время работы</th>
+                      <th>Ресурсы стенда</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {students
+                      .filter((s) => {
+                        const q = searchQuery.trim().toLowerCase();
+                        if (!q) return true;
+                        const group = (s.group_name || "Без группы").toLowerCase();
+                        const emailVal = (s.user?.login || "").toLowerCase();
+                        const nameVal = (s.full_name || "").toLowerCase();
+                        return (
+                          nameVal.includes(q) ||
+                          group.includes(q) ||
+                          emailVal.includes(q)
+                        );
+                      })
+                      .map((s) => {
+                        const checked = selectedStudentIds.includes(s.id);
+                        const info = getStandInfoForStudent(s);
+                        return (
+                          <tr
+                            key={s.id}
+                            className={checked ? "row-selected" : ""}
+                          >
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleSelectStudent(s.id)}
+                              />
+                            </td>
+                            <td>{s.full_name}</td>
+                            <td>{s.group_name || "Без группы"}</td>
+                            <td>
+                              <a
+                                href={`mailto:${s.user?.login || ""}`}
+                                className="link"
+                              >
+                                {s.user?.login}
+                              </a>
+                            </td>
+                            <td>
+                              <span className={`badge ${info.statusClass}`}>
+                                {info.statusLabel}
+                              </span>
+                            </td>
+                            <td>{info.duration}</td>
+                            <td>
+                              <span className="resources">{info.resources}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    {students.length === 0 && (
+                      <tr>
+                        <td colSpan={7}>
+                          <div className="empty-state">
+                            <p>Студентов пока нет. Создайте первого ниже.</p>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </main>
+      )}
+
+      {token && role === "admin" && activeTab === "manage" && (
+        <main className="app-main">
+          <section className="card card-manage">
+            <div className="card-header">
+              <div>
+                <h2>Управление студентами и стендами</h2>
+                <p className="card-subtitle">
+                  Стенд — это набор машин. Здесь вы создаёте стенды (наборы ВМ) и выдаёте их студентам.
+                </p>
+              </div>
+            </div>
+
+            <div className="manage-grid">
+              <div className="manage-column">
+                <h3 className="manage-title">Создать студента</h3>
+                <p className="small" style={{ marginBottom: "8px", opacity: 0.9 }}>
+                  Занятые логины смотрите в списке ниже. Для Proxmox лучше только латиница и цифры
+                  (например student1).
+                </p>
+                <div className="field">
+                  <label>Логин</label>
+                  <input
+                    value={newStudent.login}
+                    onChange={(e) => setNewStudent({ ...newStudent, login: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Пароль</label>
+                  <input
+                    value={newStudent.password}
+                    onChange={(e) => setNewStudent({ ...newStudent, password: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label>ФИО</label>
+                  <input
+                    value={newStudent.full_name}
+                    onChange={(e) => setNewStudent({ ...newStudent, full_name: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Группа</label>
+                  <input
+                    value={newStudent.group_name}
+                    onChange={(e) => setNewStudent({ ...newStudent, group_name: e.target.value })}
+                  />
+                </div>
+                <button onClick={handleCreateStudent} disabled={creatingStudent}>
+                  {creatingStudent ? "Создание…" : "Создать"}
+                </button>
+
+                <div className="manage-section">
+                  <h3 className="manage-title">Служебные действия</h3>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm("Удалить всех студентов и их стенды?")) return;
+                      try {
+                        await axios.delete(`${API_BASE}/admin/students`, { headers: authHeaders });
+                        setStudents([]);
+                        setStudentLabs({});
+                      } catch (e) {
+                        console.error(e);
+                        alert("Не удалось удалить студентов");
+                      }
+                    }}
+                  >
+                    Удалить всех студентов
+                  </button>
+                </div>
+              </div>
+
+              <div className="manage-column manage-column-wide">
+                <h3 className="manage-title">Студенты</h3>
             {loadError && (
               <div className="small" style={{ color: "#e88", marginBottom: "8px", maxWidth: "520px" }}>
                 {loadError}
@@ -218,7 +523,9 @@ function App() {
                     </div>
                     {s.proxmox_login && (
                       <div className="small" style={{ color: "#8af", marginTop: "4px" }}>
-                        Вход в Proxmox: <strong>{s.proxmox_login}</strong> (вводите именно так, в нижнем регистре)
+                        Вход в Proxmox:{" "}
+                        <strong>{formatProxmoxLogin(s.proxmox_login)}</strong> (логин;
+                        realm @pve добавится автоматически)
                       </div>
                     )}
                     <div className="small">
@@ -297,18 +604,19 @@ function App() {
                         Выдать по шаблонам
                       </button>
                     </div>
-                    {labs.length > 0 && (
+                    {stands.length > 0 && (
                       <div className="small">
-                        Или выбрать лабу:
-                        {labs.map((lab) => (
+                        Или выбрать стенд:
+                        {stands.map((stand) => (
                           <button
-                            key={lab.id}
+                            key={stand.name}
                             className="small-btn"
                             onClick={async () => {
+                              const templates = stand.vmids.join(", ");
                               try {
                                 await axios.post(
-                                  `${API_BASE}/admin/students/${s.id}/labs/${lab.id}`,
-                                  {},
+                                  `${API_BASE}/admin/students/${s.id}/stands`,
+                                  { templates },
                                   { headers: authHeaders }
                                 );
                                 loadAdminData();
@@ -325,7 +633,7 @@ function App() {
                               }
                             }}
                           >
-                            {lab.name}
+                            {stand.name}
                           </button>
                         ))}
                       </div>
@@ -359,29 +667,13 @@ function App() {
                   </li>
                 ))}
             </ul>
-          </div>
-          <div className="card">
-            <h2>Служебные действия</h2>
-            <button
-              onClick={async () => {
-                if (!window.confirm("Удалить всех студентов и их стенды?")) return;
-                try {
-                  await axios.delete(`${API_BASE}/admin/students`, { headers: authHeaders });
-                  setStudents([]);
-                  setStudentLabs({});
-                } catch (e) {
-                  console.error(e);
-                  alert("Не удалось удалить студентов");
-                }
-              }}
-            >
-              Удалить всех студентов
-            </button>
-          </div>
-          <div className="card">
-            <h2>Создание стенда</h2>
+
+                <div className="manage-section">
+                  <h3 className="manage-title">Создание стенда (набора машин)</h3>
             <p className="small" style={{ marginBottom: "8px" }}>
-              VMID через запятую или диапазон: <strong>100-103</strong> (создаст 100, 101, 102, 103) или <strong>101, 103</strong> (создаст 101 и 103). Пул и префикс названия — по желанию.
+              VMID через запятую или диапазон: <strong>100-103</strong> (создаст шаблоны для 100, 101, 102, 103)
+              или <strong>101, 103</strong> (создаст для 101 и 103). Один стенд — это набор всех указанных машин:
+              при выдаче студенту он получит столько ВМ, сколько входит в стенд.
             </p>
             {defaultCluster ? (
               <>
@@ -503,10 +795,10 @@ function App() {
                   </button>
                 </div>
                 <ul>
-                  {labs.map((lab) => (
-                    <li key={lab.id}>
-                      <strong>{lab.name}</strong> – VMID {lab.template_vmid} ({lab.template_type})
-                      {lab.use_existing_vm && " — сущ. ВМ"}
+                  {stands.map((stand) => (
+                    <li key={stand.name}>
+                      <strong>{stand.name}</strong> – VMID {stand.vmids.join(", ")}
+                      {stand.labs.some((lab) => lab.use_existing_vm) && " — сущ. ВМ"}
                     </li>
                   ))}
                 </ul>
@@ -514,8 +806,11 @@ function App() {
             ) : (
               <p>Кластер Proxmox ещё не инициализирован. Создайте первого студента.</p>
             )}
-          </div>
-        </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
       )}
     </div>
   );
