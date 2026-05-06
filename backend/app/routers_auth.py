@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import get_db
 from .models import User, UserRole
-from .schemas import Token
+from .schemas import AdminInitRequest, Token
 from .security import create_access_token, verify_password
 
 
@@ -32,28 +32,39 @@ async def login(
 
 @router.post("/init-admin", response_model=Token)
 async def init_admin(
+    payload: AdminInitRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Упрощённый эндпоинт для первого запуска:
-    создаёт администратора Admin / Admin,
-    если его ещё нет, и выдаёт токен.
+    Инициализация первого администратора:
+    логин/пароль задаются через payload.
     """
-    email = "Admin"
+    admin_exists_result = await db.execute(select(User).where(User.role == UserRole.ADMIN))
+    if admin_exists_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Администратор уже инициализирован. Используйте обычный вход.",
+        )
+
+    email = (payload.login or "").strip()
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Логин администратора обязателен")
+
     from .security import get_password_hash
 
     result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
-    if not user:
-        user = User(
-            email=email,
-            password_hash=get_password_hash("Admin"),
-            role=UserRole.ADMIN,
-            is_active=True,
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Логин уже занят")
+
+    user = User(
+        email=email,
+        password_hash=get_password_hash(payload.password),
+        role=UserRole.ADMIN,
+        is_active=True,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
 
     token = create_access_token({"user_id": user.id, "role": user.role})
     return Token(access_token=token)

@@ -2,15 +2,43 @@ import React, { useState, useEffect, useMemo } from "react";
 import axios from "axios";
 
 // URL backend: из переменной окружения (frontend/.env) или по умолчанию тот же хост, порт 8000
-const API_BASE =
-  (typeof process !== "undefined" && process.env?.REACT_APP_API_URL) ||
-  window.location.origin.replace("3000", "8000");
+const API_BASE = (() => {
+  const envUrl =
+    typeof process !== "undefined" && process.env?.REACT_APP_API_URL
+      ? process.env.REACT_APP_API_URL.trim()
+      : "";
+  if (envUrl) return envUrl;
+  const { protocol, hostname } = window.location;
+  // Встроенный браузер/прокси может использовать произвольный порт (например 65500),
+  // поэтому всегда строим URL backend как host:8000.
+  return `${protocol}//${hostname}:8000`;
+})();
+
+const extractErrorMessage = (error, fallback) => {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item?.msg) return item.msg;
+        return "";
+      })
+      .filter(Boolean);
+    if (messages.length > 0) return messages.join("; ");
+  }
+  return fallback;
+};
 
 function App() {
   const [token, setToken] = useState("");
   const [role, setRole] = useState("");
   const [email, setEmail] = useState("Admin");
   const [password, setPassword] = useState("Admin");
+  const [initLogin, setInitLogin] = useState("Admin");
+  const [initPassword, setInitPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authSuccess, setAuthSuccess] = useState("");
   const [activeTab, setActiveTab] = useState("overview"); // overview | manage
 
   const [students, setStudents] = useState([]);
@@ -70,17 +98,42 @@ function App() {
   }, []);
 
   const handleLogin = async () => {
+    setAuthError("");
+    setAuthSuccess("");
     try {
       const form = new URLSearchParams();
-      form.append("username", email);
-      form.append("password", password);
+      form.append("username", (email || "").trim());
+      form.append("password", password || "");
       const res = await axios.post(`${API_BASE}/auth/login`, form, {
         headers: { "Content-Type": "application/x-www-form-urlencoded" }
       });
       setToken(res.data.access_token);
-      setRole(email === "Admin" ? "admin" : "student");
+      setRole("admin");
     } catch (e) {
-      alert("Ошибка логина");
+      setAuthError(extractErrorMessage(e, "Ошибка логина"));
+      console.error(e);
+    }
+  };
+
+  const handleInitAdmin = async () => {
+    setAuthError("");
+    setAuthSuccess("");
+    if ((initPassword || "").length < 8) {
+      setAuthError("Пароль администратора должен быть не короче 8 символов");
+      return;
+    }
+    try {
+      const res = await axios.post(`${API_BASE}/auth/init-admin`, {
+        login: (initLogin || "").trim(),
+        password: initPassword
+      });
+      setToken(res.data.access_token);
+      setRole("admin");
+      setEmail((initLogin || "").trim());
+      setPassword("");
+      setAuthSuccess("Администратор создан. Выполняется вход.");
+    } catch (e) {
+      setAuthError(extractErrorMessage(e, "Не удалось инициализировать администратора"));
       console.error(e);
     }
   };
@@ -297,6 +350,45 @@ function App() {
               <div className="login-actions">
                 <button type="submit" className="btn btn-primary">
                   Войти
+                </button>
+              </div>
+              {authError && <p className="error">{authError}</p>}
+              {authSuccess && <p className="small">{authSuccess}</p>}
+            </form>
+
+            <form
+              className="login-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleInitAdmin();
+              }}
+            >
+              <p className="card-subtitle" style={{ marginTop: "10px" }}>
+                Первый запуск: создайте администратора
+              </p>
+              <label className="field">
+                <span className="field-label">Новый логин администратора</span>
+                <input
+                  type="text"
+                  className="field-input"
+                  value={initLogin}
+                  onChange={(e) => setInitLogin(e.target.value)}
+                  autoComplete="username"
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Новый пароль администратора</span>
+                <input
+                  type="password"
+                  className="field-input"
+                  value={initPassword}
+                  onChange={(e) => setInitPassword(e.target.value)}
+                  autoComplete="new-password"
+                />
+              </label>
+              <div className="login-actions">
+                <button type="submit" className="btn btn-ghost">
+                  Создать администратора
                 </button>
               </div>
             </form>
@@ -670,19 +762,13 @@ function App() {
 
                 <div className="manage-section">
                   <h3 className="manage-title">Создание стенда (набора машин)</h3>
-            <p className="small" style={{ marginBottom: "8px" }}>
-              VMID через запятую или диапазон: <strong>100-103</strong> (создаст шаблоны для 100, 101, 102, 103)
-              или <strong>101, 103</strong> (создаст для 101 и 103). Один стенд — это набор всех указанных машин:
-              при выдаче студенту он получит столько ВМ, сколько входит в стенд.
-            </p>
             {defaultCluster ? (
               <>
                 <div className="field">
-                  <label>Префикс названия</label>
+                  <label>Название шаблона</label>
                   <input
                     value={newLab.name}
                     onChange={(e) => setNewLab({ ...newLab, name: e.target.value })}
-                    placeholder="Шаблон (будет «Шаблон 100», «Шаблон 101»…)"
                   />
                 </div>
                 <div className="field">
@@ -690,37 +776,6 @@ function App() {
                   <input
                     value={newLab.template_vmid}
                     onChange={(e) => setNewLab({ ...newLab, template_vmid: e.target.value })}
-                    placeholder="100-103 или 101, 103"
-                  />
-                </div>
-                <div className="field">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={newLab.use_existing_vm || false}
-                      onChange={(e) =>
-                        setNewLab({ ...newLab, use_existing_vm: e.target.checked })
-                      }
-                    />
-                    {" "}Существующая ВМ (не клонировать — указанная машина будет выдаваться студенту)
-                  </label>
-                </div>
-                <div className="field">
-                  <label>Тип</label>
-                  <select
-                    value={newLab.template_type}
-                    onChange={(e) => setNewLab({ ...newLab, template_type: e.target.value })}
-                  >
-                    <option value="qemu">VM (qemu)</option>
-                    <option value="lxc">LXC</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Пул (Node)</label>
-                  <input
-                    value={newLab.default_node}
-                    onChange={(e) => setNewLab({ ...newLab, default_node: e.target.value })}
-                    placeholder={defaultCluster.default_node}
                   />
                 </div>
                 <div className="field">
@@ -738,9 +793,9 @@ function App() {
                           {
                             template_vmids: vmidStr,
                             name_prefix: namePrefix,
-                            template_type: newLab.template_type,
-                            use_existing_vm: newLab.use_existing_vm || false,
-                            default_node: newLab.default_node || null,
+                            template_type: "qemu",
+                            use_existing_vm: false,
+                            default_node: null,
                             proxmox_cluster_id: defaultCluster.id
                           },
                           { headers: authHeaders }
@@ -769,7 +824,7 @@ function App() {
                       }
                     }}
                   >
-                    {newLab.use_existing_vm ? "Создать стенды (сущ. ВМ)" : "Создать шаблон(ы)"}
+                    Создать шаблон(ы)
                   </button>
                   <button
                     style={{ marginLeft: "8px" }}
@@ -798,7 +853,6 @@ function App() {
                   {stands.map((stand) => (
                     <li key={stand.name}>
                       <strong>{stand.name}</strong> – VMID {stand.vmids.join(", ")}
-                      {stand.labs.some((lab) => lab.use_existing_vm) && " — сущ. ВМ"}
                     </li>
                   ))}
                 </ul>

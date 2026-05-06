@@ -155,6 +155,23 @@ class ProxmoxClient:
             self.wait_for_task(node, upid, timeout=task_timeout)
         return newid
 
+    def vm_config(self, node: str, vmid: int) -> dict[str, Any]:
+        """Конфиг QEMU VM из Proxmox."""
+        data = self._request("GET", f"/nodes/{node}/qemu/{vmid}/config")
+        return data if isinstance(data, dict) else {}
+
+    def is_qemu_template(self, node: str, vmid: int) -> bool:
+        """
+        Проверка, что QEMU VM помечена как template в Proxmox.
+        В API это флаг template=1 в конфиге VM.
+        """
+        cfg = self.vm_config(node=node, vmid=vmid)
+        val = cfg.get("template", 0)
+        try:
+            return int(val) == 1
+        except (TypeError, ValueError):
+            return False
+
     def vm_status_action(self, node: str, vmid: int, action: Literal["start", "stop", "reset"]) -> Any:
         return self._request("POST", f"/nodes/{node}/qemu/{vmid}/status/{action}")
 

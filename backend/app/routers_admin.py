@@ -55,21 +55,32 @@ def _normalize_proxmox_userid(login: str, realm: str) -> str:
 
 def _parse_template_vmids(s: str) -> list[int]:
     """Парсит «101-103» или «101, 102, 103» в список VMID."""
-    s = s.strip().replace(" ", "")
+    s = (s or "").strip()
     if not s:
         return []
     out: list[int] = []
-    for part in s.split(","):
+    # Разрешаем запятую/точку с запятой/плюс как разделители списков:
+    # "101,103", "101;103", "101 + 103".
+    parts = re.split(r"[,+;]", s)
+    for part in parts:
         part = part.strip()
+        if not part:
+            continue
         if "-" in part:
-            a, b = part.split("-", 1)
+            # Диапазон: "101-103" (в т.ч. с пробелами вокруг дефиса).
+            m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+            if not m:
+                continue
             try:
-                lo, hi = int(a.strip()), int(b.strip())
+                lo, hi = int(m.group(1)), int(m.group(2))
                 if lo <= hi:
                     out.extend(range(lo, hi + 1))
             except ValueError:
                 continue
         else:
+            # Отдельный VMID. Важный момент: "100 550" не склеиваем в 100550.
+            if not re.fullmatch(r"\d+", part):
+                continue
             try:
                 out.append(int(part))
             except ValueError:
@@ -184,6 +195,11 @@ def _proxmox_assign_vm_sync(
     if use_existing_vm:
         vmid = template_vmid
     else:
+        if not proxmox.is_qemu_template(node=node, vmid=template_vmid):
+            raise ValueError(
+                f"VMID {template_vmid} на ноде {node} не помечен как template в Proxmox "
+                f"(Datacenter -> VM -> More -> Convert to template)"
+            )
         vmid = proxmox.clone_vm(node=node, vmid=template_vmid, name=clone_name)
     try:
         proxmox.set_vm_name(node=node, vmid=vmid, name=clone_name)
@@ -328,7 +344,7 @@ async def delete_all_students(
 ):
     """
     Удаляет всех студентов, их профили, стенды и учётки в Proxmox.
-    Админов не трогаем.
+    В БД удаляются все пользователи, кроме администраторов (в т.ч. «осиротевшие» записи users).
     """
     settings = get_settings()
     proxmox = ProxmoxClient.from_settings()
@@ -410,7 +426,7 @@ async def delete_all_students(
     await db.execute(delete(StudentLabInstance))
     await db.execute(delete(ProxmoxAccount))
     await db.execute(delete(StudentProfile))
-    await db.execute(delete(User).where(User.role == UserRole.STUDENT))
+    await db.execute(delete(User).where(User.role != UserRole.ADMIN))
     await db.commit()
 
 
@@ -425,6 +441,13 @@ async def delete_student(
     """
     settings = get_settings()
     proxmox = ProxmoxClient.from_settings()
+
+    # Находим профиль, чтобы гарантированно удалить связанного пользователя из users.
+    student_result = await db.execute(select(StudentProfile).where(StudentProfile.id == student_id))
+    student_profile = student_result.scalar_one_or_none()
+    if not student_profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    user_id_to_delete = student_profile.user_id
 
     # Находим proxmox-аккаунт студента (userid для Proxmox).
     acc_result = await db.execute(select(ProxmoxAccount).where(ProxmoxAccount.student_id == student_id))
@@ -477,10 +500,12 @@ async def delete_student(
     await db.execute(delete(StudentLabInstance).where(StudentLabInstance.student_id == student_id))
     await db.execute(delete(ProxmoxAccount).where(ProxmoxAccount.student_id == student_id))
     await db.execute(delete(StudentProfile).where(StudentProfile.id == student_id))
-    subq = select(User.id).join(StudentProfile, StudentProfile.user_id == User.id).where(
-        StudentProfile.id == student_id, User.role == UserRole.STUDENT
+    await db.execute(
+        delete(User).where(
+            User.id == user_id_to_delete,
+            User.role == UserRole.STUDENT,
+        )
     )
-    await db.execute(delete(User).where(User.id.in_(subq)))
     await db.commit()
 
 

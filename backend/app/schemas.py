@@ -16,6 +16,11 @@ class TokenData(BaseModel):
     role: UserRole
 
 
+class AdminInitRequest(BaseModel):
+    login: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=255)
+
+
 class UserBase(BaseModel):
     login: str
 
